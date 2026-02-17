@@ -15,7 +15,23 @@ const anthropic = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY,
 });
 
-// UPGRADED: Streaming chat endpoint using SSE
+// ─── How SSE works ────────────────────────────────────────────────────────────
+//
+//  SSE (Server-Sent Events) is a one-way channel: server → client.
+//  The wire format is plain text:
+//
+//    data: <payload>\n\n        ← a single event
+//    data: <payload>\n\n        ← the next event
+//    data: [DONE]\n\n           ← our custom end-of-stream sentinel
+//
+//  Rules:
+//   • Content-Type MUST be "text/event-stream"
+//   • Each event ends with a blank line (\n\n)
+//   • Lines that start with "data:" carry the payload
+//   • The server must NOT buffer — it must flush each write immediately
+//
+// ─────────────────────────────────────────────────────────────────────────────
+
 app.post('/api/chat', async (req, res) => {
   const { prompt } = req.body;
 
@@ -26,17 +42,20 @@ app.post('/api/chat', async (req, res) => {
   try {
     console.log(`Streaming prompt: "${prompt}"...`);
 
-    // 1. THE FIX: Strict Anti-Buffering Headers
+    // ── 1. Set SSE headers ──────────────────────────────────────────────────
+    // These three headers turn a normal HTTP response into an SSE stream.
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache, no-transform'); // 'no-transform' stops proxies from compressing
     res.setHeader('Connection', 'keep-alive');
-    res.setHeader('X-Accel-Buffering', 'no'); // Tells Nginx and other proxies NOT to buffer
-    
-    // 2. THE FIX: Force Express to send the headers to React IMMEDIATELY, 
-    // before Claude even starts thinking. This guarantees the pipe is open.
-    res.flushHeaders(); 
+    res.setHeader('X-Accel-Buffering', 'no'); // Tells Nginx NOT to buffer this response
 
-    // 3. Tell Claude we want a stream back
+    // Flush the headers to the client immediately so it knows a stream is coming.
+    // Without this, some runtimes hold the headers until the first write().
+    res.flushHeaders();
+
+    // ── 2. Ask Claude for a streaming response ──────────────────────────────
+    // stream: true makes the SDK return an AsyncIterable instead of waiting
+    // for the full response. Each iteration yields one chunk from Claude.
     const stream = await anthropic.messages.create({
       model: 'claude-3-haiku-20240307',
       max_tokens: 1024,
@@ -44,14 +63,24 @@ app.post('/api/chat', async (req, res) => {
       stream: true,
     });
 
-    // 4. Listen to the stream from Claude and forward it to React
+    // ── 3. Forward each chunk to the client as an SSE event ─────────────────
     for await (const chunk of stream) {
+      // The Anthropic SDK emits several event types; we only care about
+      // 'content_block_delta' which carries the actual text tokens.
       if (chunk.type === 'content_block_delta' && chunk.delta.text) {
-        const data = JSON.stringify({ text: chunk.delta.text });
-        res.write(`data: ${data}\n\n`);
+        // Serialize the token as JSON so the client can parse it safely,
+        // then wrap it in the SSE wire format:  data: <json>\n\n
+        const payload = JSON.stringify({ text: chunk.delta.text });
+        res.write(`data: ${payload}\n\n`);
+        // Node's HTTP stack flushes automatically for streaming responses,
+        // but if you ever see delays you can call res.flush() here (requires
+        // the compression middleware's flush method or a raw socket write).
       }
     }
 
+    // ── 4. Signal end-of-stream ─────────────────────────────────────────────
+    // [DONE] is not part of the SSE spec — it's a convention (popularised by
+    // OpenAI) that tells the client "no more events are coming".
     res.write('data: [DONE]\n\n');
     res.end();
     console.log('Stream complete.');
@@ -59,8 +88,10 @@ app.post('/api/chat', async (req, res) => {
   } catch (error) {
     console.error('Anthropic API Error:', error);
     if (!res.headersSent) {
+      // Headers not sent yet — can still send a normal JSON error
       res.status(500).json({ error: 'Failed to generate response' });
     } else {
+      // Headers already sent (stream started) — just close the connection
       res.end();
     }
   }
