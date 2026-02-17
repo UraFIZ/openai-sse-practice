@@ -36,7 +36,7 @@ function App() {
       // Step 1: POST the prompt — the server responds with Content-Type: text/event-stream
       // We do NOT use the native EventSource API because it only supports GET.
       // Instead we use fetch() and read the response body as a stream manually.
-      const res = await fetch('http://localhost:5001/api/chat', {
+      const res = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ prompt }),

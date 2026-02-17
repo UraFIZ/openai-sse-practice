@@ -53,6 +53,24 @@ app.post('/api/chat', async (req, res) => {
     // Without this, some runtimes hold the headers until the first write().
     res.flushHeaders();
 
+    // ── 1b. Disable Nagle's algorithm ─────────────────────────────────────
+    // TCP's Nagle algorithm batches small writes into a single packet for
+    // efficiency.  That is catastrophic for SSE because each token is tiny
+    // (~10-50 bytes).  setNoDelay(true) forces every res.write() to be sent
+    // as its own TCP packet immediately — no coalescing, no delay.
+    if (res.socket) {
+      res.socket.setNoDelay(true);
+    }
+
+    // ── 1c. Send an initial padding comment ───────────────────────────────
+    // Some browsers (notably Chrome) will not start delivering a streaming
+    // fetch response to JavaScript until a certain amount of data has been
+    // received (internal "sniff" buffer, typically ~1 KB).  We send a
+    // harmless SSE comment (lines starting with ':' are ignored by clients)
+    // padded to 2 KB to immediately bust through that browser buffer.
+    const padding = ': ' + 'x'.repeat(2048) + '\n\n';
+    res.write(padding);
+
     // ── 2. Ask Claude for a streaming response ──────────────────────────────
     // stream: true makes the SDK return an AsyncIterable instead of waiting
     // for the full response. Each iteration yields one chunk from Claude.
@@ -72,9 +90,6 @@ app.post('/api/chat', async (req, res) => {
         // then wrap it in the SSE wire format:  data: <json>\n\n
         const payload = JSON.stringify({ text: chunk.delta.text });
         res.write(`data: ${payload}\n\n`);
-        // Node's HTTP stack flushes automatically for streaming responses,
-        // but if you ever see delays you can call res.flush() here (requires
-        // the compression middleware's flush method or a raw socket write).
       }
     }
 
