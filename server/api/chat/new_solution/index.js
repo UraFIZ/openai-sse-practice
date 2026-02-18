@@ -14,35 +14,36 @@ const words = [
   'This',
   'is',
   'a',
-  'simple',
-  'fetch-event-source',
+  'fetch-based',
+  'SSE',
   'stream',
-  'sending',
-  'one',
+  'that',
+  'renders',
   'word',
-  'every',
-  'two',
-  'seconds.',
+  'by',
+  'word.',
 ];
 
-/**
- * POST /api/stream
- *
- * Unlike the SSE/index.js solution (GET with EventSource), this uses POST.
- * Advantage: the prompt travels in the request body, not the query string.
- * No URL length limits, no prompt leaking into server logs/browser history.
- *
- * The client reads the response using fetch + ReadableStream (not EventSource),
- * which gives chunk-by-chunk rendering with POST support and AbortController.
- */
 app.post('/api/stream', (req, res) => {
+  res.status(200);
   res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
-  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
   res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.setHeader('Content-Encoding', 'identity');
   res.flushHeaders();
 
+  // Helps some clients/proxies start forwarding immediately.
+  res.write(': stream-start\n\n');
+
+  let closed = false;
   let index = 0;
+
   const timer = setInterval(() => {
+    if (closed) {
+      return;
+    }
+
     if (index >= words.length) {
       res.write('data: [DONE]\n\n');
       clearInterval(timer);
@@ -50,16 +51,18 @@ app.post('/api/stream', (req, res) => {
       return;
     }
 
-    const payload = JSON.stringify({ value: words[index] + ' ' });
-    console.log(`Sending chunk: ${payload}`);
+    const payload = JSON.stringify({ value: `${words[index]} ` });
     res.write(`data: ${payload}\n\n`);
     index += 1;
-  }, 2000);
+  }, 600);
 
-  // req.on('close', () => {
-  //   clearInterval(timer);
-  //   res.end();
-  // });
+  const cleanup = () => {
+    closed = true;
+    clearInterval(timer);
+  };
+
+  req.on('aborted', cleanup);
+  res.on('close', cleanup);
 });
 
 app.listen(port, () => {
