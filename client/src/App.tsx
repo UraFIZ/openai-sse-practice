@@ -1,6 +1,7 @@
 import { BrowserRouter, NavLink, Route, Routes } from 'react-router-dom';
 import SsePage from './pages/SsePage';
 import StandardPage from './pages/StandardPage';
+import NewSolution from './pages/NewSolution';
 
 function App() {
   return (
@@ -31,12 +32,25 @@ function App() {
           >
             SSE
           </NavLink>
+          <NavLink
+            to="/new-solution"
+            style={({ isActive }) => ({
+              padding: '8px 12px',
+              borderRadius: '6px',
+              textDecoration: 'none',
+              color: 'white',
+              backgroundColor: isActive ? '#007bff' : '#2c2f36',
+            })}
+          >
+            New Solution
+          </NavLink>
         </nav>
 
         <Routes>
           <Route path="/" element={<StandardPage />} />
           <Route path="/standard" element={<StandardPage />} />
           <Route path="/sse" element={<SsePage />} />
+          <Route path="/new-solution" element={<NewSolution />} />
         </Routes>
       </div>
     </BrowserRouter>
