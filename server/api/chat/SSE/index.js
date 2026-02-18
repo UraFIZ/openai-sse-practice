@@ -32,44 +32,44 @@ const anthropic = new Anthropic({
 //
 // ─────────────────────────────────────────────────────────────────────────────
 
-app.post('/api/chat', async (req, res) => {
-  const { prompt } = req.body;
-
-  if (!prompt) {
-    return res.status(400).json({ error: 'Prompt is required' });
-  }
-
+const streamPrompt = async (res, prompt) => {
   try {
     console.log(`Streaming prompt: "${prompt}"...`);
 
     // ── 1. Set SSE headers ──────────────────────────────────────────────────
-    // These three headers turn a normal HTTP response into an SSE stream.
-    res.setHeader('Content-Type', 'text/event-stream');
+    // These headers turn a normal HTTP response into an SSE stream.
+    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
     res.setHeader('Cache-Control', 'no-cache, no-transform'); // 'no-transform' stops proxies from compressing
     res.setHeader('Connection', 'keep-alive');
     res.setHeader('X-Accel-Buffering', 'no'); // Tells Nginx NOT to buffer this response
+    res.setHeader('Transfer-Encoding', 'chunked');
 
     // Flush the headers to the client immediately so it knows a stream is coming.
     // Without this, some runtimes hold the headers until the first write().
     res.flushHeaders();
 
-    // ── 1b. Disable Nagle's algorithm ─────────────────────────────────────
-    // TCP's Nagle algorithm batches small writes into a single packet for
-    // efficiency.  That is catastrophic for SSE because each token is tiny
-    // (~10-50 bytes).  setNoDelay(true) forces every res.write() to be sent
-    // as its own TCP packet immediately — no coalescing, no delay.
     if (res.socket) {
       res.socket.setNoDelay(true);
     }
 
-    // ── 1c. Send an initial padding comment ───────────────────────────────
-    // Some browsers (notably Chrome) will not start delivering a streaming
-    // fetch response to JavaScript until a certain amount of data has been
-    // received (internal "sniff" buffer, typically ~1 KB).  We send a
-    // harmless SSE comment (lines starting with ':' are ignored by clients)
-    // padded to 2 KB to immediately bust through that browser buffer.
-    const padding = ': ' + 'x'.repeat(2048) + '\n\n';
-    res.write(padding);
+    // Send a padding comment to push data through browser/proxy buffers.
+    res.write(': ' + 'x'.repeat(2048) + '\n\n');
+
+    const keepAlive = setInterval(() => {
+      res.write(': keep-alive\n\n');
+    }, 15000);
+
+    res.on('close', () => {
+      clearInterval(keepAlive);
+      res.end();
+    });
+
+    const writeSse = (data) => {
+      res.write(`data: ${data}\n\n`);
+      if (typeof res.flush === 'function') {
+        res.flush();
+      }
+    };
 
     // ── 2. Ask Claude for a streaming response ──────────────────────────────
     // stream: true makes the SDK return an AsyncIterable instead of waiting
@@ -89,14 +89,15 @@ app.post('/api/chat', async (req, res) => {
         // Serialize the token as JSON so the client can parse it safely,
         // then wrap it in the SSE wire format:  data: <json>\n\n
         const payload = JSON.stringify({ text: chunk.delta.text });
-        res.write(`data: ${payload}\n\n`);
+        writeSse(payload);
       }
     }
 
     // ── 4. Signal end-of-stream ─────────────────────────────────────────────
     // [DONE] is not part of the SSE spec — it's a convention (popularised by
     // OpenAI) that tells the client "no more events are coming".
-    res.write('data: [DONE]\n\n');
+    writeSse('[DONE]');
+    clearInterval(keepAlive);
     res.end();
     console.log('Stream complete.');
 
@@ -110,6 +111,26 @@ app.post('/api/chat', async (req, res) => {
       res.end();
     }
   }
+};
+
+app.get('/api/events', async (req, res) => {
+  const prompt = typeof req.query.prompt === 'string' ? req.query.prompt : '';
+
+  if (!prompt.trim()) {
+    return res.status(400).json({ error: 'Prompt is required' });
+  }
+
+  await streamPrompt(res, prompt);
+});
+
+app.post('/api/chat', async (req, res) => {
+  const { prompt } = req.body;
+
+  if (!prompt) {
+    return res.status(400).json({ error: 'Prompt is required' });
+  }
+
+  await streamPrompt(res, prompt);
 });
 
 app.listen(port, () => {

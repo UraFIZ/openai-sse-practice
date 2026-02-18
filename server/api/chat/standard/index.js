@@ -1,7 +1,8 @@
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
-import Anthropic from '@anthropic-ai/sdk';
+// import Anthropic from '@anthropic-ai/sdk';
+import OpenAI from 'openai';
 
 // Load environment variables
 dotenv.config();
@@ -14,8 +15,12 @@ app.use(cors());
 app.use(express.json());
 
 // Initialize Anthropic Client
-const anthropic = new Anthropic({
-  apiKey: process.env.ANTHROPIC_API_KEY, // Ensure this is set in your .env file
+// const anthropic = new Anthropic({
+//   apiKey: process.env.ANTHROPIC_API_KEY, // Ensure this is set in your .env file
+// });
+
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY, // Ensure this is set in your .env file
 });
 
 // Traditional, non-streaming chat endpoint
@@ -27,16 +32,15 @@ app.post('/api/chat', async (req, res) => {
   }
 
   try {
-    console.log(`Received prompt: "${prompt}", waiting for Claude...`);
+    console.log(`Received prompt: "${prompt}", waiting for OpenAI...`);
     
-    // Block and wait for Claude to generate the entire response
-    const msg = await anthropic.messages.create({
-      model: 'claude-3-haiku-20240307', 
-      max_tokens: 1024,
+    // Block and wait for the full response (non-streaming)
+    const msg = await openai.chat.completions.create({
+      model: 'gpt-5-mini',
       messages: [{ role: 'user', content: prompt }],
     });
 
-    const responseText = msg.content[0].text;
+    const responseText = msg.choices?.[0]?.message?.content || '';
     console.log('Response fully generated. Sending to client.');
     
     // Send the complete response back to the React app
