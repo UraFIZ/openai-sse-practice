@@ -15,79 +15,53 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
-const startCompletionStream = async (prompt) => {
-    const response = await openai.chat.completions.create({
-      model: 'gpt-4o-mini', // Use your desired model
-      max_tokens: 1024,
-      stream: true, // Enable streaming
-      messages: [{ role: 'user', content: prompt }],
-    });
-    console.log('Stream started:', response);
-    // response.data.on('data', (chunk) => {
-    //   console.log('Received chunk:', chunk);
-    // })
-  }
+app.get('/api/events', async (req, res) => {
+  const prompt = typeof req.query.prompt === 'string' ? req.query.prompt : '';
 
-startCompletionStream('Cars are amazing because')
-
-app.post('/api/chat', async (req, res) => {
-  const { prompt } = req.body;
-
-  if (!prompt) {
+  if (!prompt.trim()) {
     return res.status(400).json({ error: 'Prompt is required' });
   }
 
-  // 1. Strict Anti-Buffering Headers
-  res.setHeader('Content-Type', 'text/event-stream');
-  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
-  res.setHeader('X-Accel-Buffering', 'no');
-  res.flushHeaders(); 
+  res.flushHeaders();
 
-  // 2. Setup AbortController
   const abortController = new AbortController();
 
   req.on('close', () => {
-    console.log('Client disconnected. Aborting generation...');
-    abortController.abort(); 
+    abortController.abort();
   });
 
   try {
+    console.log(`Received prompt: "${prompt}", starting OpenAI stream...`);
     const stream = await openai.chat.completions.create(
       {
-        model: 'gpt-4o-mini', 
+        model: 'gpt-4o-mini',
         messages: [{ role: 'user', content: prompt }],
-        stream: true, 
+        stream: true,
       },
       {
-        signal: abortController.signal, 
+        signal: abortController.signal,
       }
     );
 
     for await (const chunk of stream) {
       const content = chunk.choices[0]?.delta?.content || '';
-      
       if (content) {
         const payload = JSON.stringify({ text: content });
         res.write(`data: ${payload}\n\n`);
-        
-        if (res.flush) {
-          res.flush();
-        }
       }
     }
 
     res.write('data: [DONE]\n\n');
     res.end();
-    console.log('OpenAI Stream complete.');
-
   } catch (error) {
     const errorName = error?.name;
     const errorMessage = error?.message || '';
     const isAbort = errorName === 'AbortError' || errorName === 'APIUserAbortError' || errorMessage.includes('aborted');
 
     if (isAbort) {
-      console.log('Stream aborted by client.');
       return;
     }
 
