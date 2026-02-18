@@ -118,9 +118,20 @@ app.post('/api/stream', (req, res) => {
     }
   });
 
-  // If the client disconnects (closes tab, aborts fetch), clean up.
-  req.on('close', () => {
-    chatStream.abort();
+  // Detect client disconnection (closed tab, aborted fetch).
+  //
+  // IMPORTANT: req.on('close') is WRONG here. The request is a Readable
+  // stream — its 'close' fires when the request BODY is fully consumed.
+  // Since express.json() already parsed the POST body before this handler
+  // runs, req 'close' fires immediately. That's why it was aborting instantly.
+  //
+  // res.on('close') is correct. The response is a Writable stream — its
+  // 'close' fires when the connection is actually terminated, either by
+  // res.end() (normal) or by the client disconnecting (premature).
+  res.on('close', () => {
+    if (!res.writableFinished) {
+      chatStream.abort();
+    }
   });
 });
 
