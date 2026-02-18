@@ -1,37 +1,51 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 
 type StreamMetrics = {
   ttftMs: number | null;
   totalMs: number | null;
 };
 
-function parseSseEvents(buffer: string): { events: string[]; rest: string } {
+type ParsedSse = {
+  dataEvents: string[];
+  rest: string;
+};
+
+// Controls how "smooth" text appears (characters per frame and frame interval).
+const RENDER_CONFIG = {
+  charsPerTick: 3,
+  tickMs: 28,
+};
+
+// Parse complete SSE frames from a growing string buffer.
+function parseSseEvents(buffer: string): ParsedSse {
   const normalized = buffer.replace(/\r\n/g, '\n');
   const frames = normalized.split('\n\n');
   const rest = frames.pop() ?? '';
-
-  const events: string[] = [];
+  const dataEvents: string[] = [];
 
   for (const frame of frames) {
-    if (!frame.trim()) {
+    // Skip heartbeats/comments/empty frames.
+    if (!frame.trim() || frame.startsWith(':')) {
       continue;
     }
 
-    const dataLines = frame
+    // Collect multiline `data:` payloads into one logical event string.
+    const data = frame
       .split('\n')
       .filter((line) => line.startsWith('data:'))
-      .map((line) => line.slice(5).trimStart());
+      .map((line) => line.slice(5).trimStart())
+      .join('\n');
 
-    if (dataLines.length > 0) {
-      events.push(dataLines.join('\n'));
+    if (data) {
+      dataEvents.push(data);
     }
   }
 
-  return { events, rest };
+  return { dataEvents, rest };
 }
 
 function NewSolution() {
-  const [prompt, setPrompt] = useState('demo');
+  const [message, setMessage] = useState('Explain SSE streaming in one paragraph.');
   const [response, setResponse] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [metrics, setMetrics] = useState<StreamMetrics>({ ttftMs: null, totalMs: null });
@@ -39,23 +53,81 @@ function NewSolution() {
   const responseEndRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
 
+  // Queue stores raw streamed text before it is rendered smoothly.
+  const renderQueueRef = useRef('');
+  const renderTimerRef = useRef<number | null>(null);
+
   useEffect(() => {
     responseEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [response]);
 
   useEffect(() => () => abortRef.current?.abort(), []);
 
-  const stopStream = () => {
+  // Stops the incremental render loop.
+  const stopRenderLoop = useCallback(() => {
+    if (renderTimerRef.current !== null) {
+      window.clearInterval(renderTimerRef.current);
+      renderTimerRef.current = null;
+    }
+  }, []);
+
+  // Adds new streamed text into the rendering queue.
+  const enqueueForRender = useCallback((nextChunk: string) => {
+    renderQueueRef.current += nextChunk;
+  }, []);
+
+  // Starts smooth UI rendering from queue -> response state in small steps.
+  const startRenderLoop = useCallback(() => {
+    if (renderTimerRef.current !== null) {
+      return;
+    }
+
+    renderTimerRef.current = window.setInterval(() => {
+      const queue = renderQueueRef.current;
+      if (!queue) {
+        return;
+      }
+
+      const nextPart = queue.slice(0, RENDER_CONFIG.charsPerTick);
+      renderQueueRef.current = queue.slice(RENDER_CONFIG.charsPerTick);
+      setResponse((prev) => prev + nextPart);
+    }, RENDER_CONFIG.tickMs);
+  }, []);
+
+  // Flushes remaining queued text instantly (used on finish/error/stop).
+  const flushRenderQueue = useCallback(() => {
+    const pending = renderQueueRef.current;
+    if (pending) {
+      setResponse((prev) => prev + pending);
+      renderQueueRef.current = '';
+    }
+  }, []);
+
+  const resetRenderState = useCallback(() => {
+    stopRenderLoop();
+    renderQueueRef.current = '';
+  }, [stopRenderLoop]);
+
+  const stopStream = useCallback(() => {
+    // Abort pending network stream.
     abortRef.current?.abort();
     abortRef.current = null;
+
+    // Finish rendering already buffered text and stop loading state.
+    flushRenderQueue();
+    stopRenderLoop();
     setIsLoading(false);
-  };
+  }, [flushRenderQueue, stopRenderLoop]);
 
   const startStream = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!prompt.trim()) return;
+    if (!message.trim()) {
+      return;
+    }
 
+    // Stop any previous stream and reset render pipeline.
     stopStream();
+    resetRenderState();
 
     const controller = new AbortController();
     abortRef.current = controller;
@@ -63,11 +135,13 @@ function NewSolution() {
     setIsLoading(true);
     setResponse('');
     setMetrics({ ttftMs: null, totalMs: null });
+    startRenderLoop();
 
     const startedAt = Date.now();
-    let sawFirstToken = false;
+    let hasFirstToken = false;
 
     try {
+      // Start POST request and ask server for SSE response.
       const res = await fetch('/api/stream', {
         method: 'POST',
         headers: {
@@ -75,8 +149,8 @@ function NewSolution() {
           Accept: 'text/event-stream',
         },
         body: JSON.stringify({
-          model: 'demo-model',
-          message: prompt,
+          model: 'gpt-4o-mini',
+          message,
           stream: true,
         }),
         signal: controller.signal,
@@ -87,45 +161,60 @@ function NewSolution() {
       }
 
       if (!res.body) {
-        throw new Error('Response body is not streamable in this browser/runtime.');
+        throw new Error('ReadableStream is not available in this browser context.');
       }
 
+      // Read chunks from fetch stream and decode UTF-8 bytes incrementally.
       const reader = res.body.getReader();
-      const decoder = new TextDecoder('utf-8');
+      const decoder = new TextDecoder();
       let buffer = '';
       let done = false;
 
       while (!done) {
-        const readResult = await reader.read();
-        done = readResult.done;
+        const part = await reader.read();
+        done = part.done;
 
-        if (readResult.value) {
-          buffer += decoder.decode(readResult.value, { stream: true });
-          const { events, rest } = parseSseEvents(buffer);
-          buffer = rest;
+        if (!part.value) {
+          continue;
+        }
 
-          for (const eventData of events) {
-            if (eventData === '[DONE]') {
-              done = true;
-              break;
+        // Append decoded text to parser buffer and extract full SSE events.
+        buffer += decoder.decode(part.value, { stream: true });
+        const { dataEvents, rest } = parseSseEvents(buffer);
+        buffer = rest;
+
+        for (const eventData of dataEvents) {
+          if (eventData === '[DONE]') {
+            done = true;
+            break;
+          }
+
+          try {
+            const parsed = JSON.parse(eventData) as { value?: string; error?: string };
+            if (parsed.error) {
+              throw new Error(parsed.error);
             }
 
-            try {
-              const parsed = JSON.parse(eventData) as { value?: string };
-              if (parsed.value) {
-                if (!sawFirstToken) {
-                  sawFirstToken = true;
-                  setMetrics((prev) => ({ ...prev, ttftMs: Date.now() - startedAt }));
-                }
-                setResponse((prev) => prev + parsed.value);
-              }
-            } catch {
-              // Ignore malformed event payloads.
+            if (!parsed.value) {
+              continue;
             }
+
+            // Capture time-to-first-token once.
+            if (!hasFirstToken) {
+              hasFirstToken = true;
+              setMetrics((prev) => ({ ...prev, ttftMs: Date.now() - startedAt }));
+            }
+
+            // Enqueue new text; UI loop renders it smoothly.
+            enqueueForRender(parsed.value);
+          } catch (parseError) {
+            console.error('Malformed SSE payload', parseError);
           }
         }
       }
 
+      // Ensure final characters are rendered and finalize timing.
+      flushRenderQueue();
       setMetrics((prev) => ({ ...prev, totalMs: Date.now() - startedAt }));
     } catch (error) {
       if ((error as Error).name !== 'AbortError') {
@@ -136,24 +225,26 @@ function NewSolution() {
       if (abortRef.current === controller) {
         abortRef.current = null;
       }
+
+      stopRenderLoop();
       setIsLoading(false);
     }
   };
 
   return (
     <div style={{ maxWidth: '760px', margin: '30px auto', fontFamily: 'sans-serif', paddingBottom: '80px' }}>
-      <h1>POST + fetch() + SSE stream parser</h1>
+      <h1>OpenAI fetch() + POST + SSE</h1>
       <p style={{ color: '#555' }}>
-        This page uses <code>fetch</code> (POST JSON body) and parses <code>text/event-stream</code> manually from
-        <code>ReadableStream</code> chunks.
+        Uses fetch POST with JSON body and reads <code>text/event-stream</code> incrementally from
+        <code>ReadableStream</code> with smooth token rendering.
       </p>
 
       <form onSubmit={startStream} style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
         <textarea
-          value={prompt}
-          onChange={(e) => setPrompt(e.target.value)}
-          placeholder="Prompt"
-          rows={3}
+          value={message}
+          onChange={(e) => setMessage(e.target.value)}
+          placeholder="Type your prompt"
+          rows={4}
           style={{ padding: '10px', fontSize: '16px', borderRadius: '4px' }}
         />
 
@@ -209,9 +300,12 @@ function NewSolution() {
             color: '#d4d4d4',
             borderRadius: '8px',
             whiteSpace: 'pre-wrap',
-            lineHeight: '1.6',
+            lineHeight: '1.7',
             fontSize: '16px',
-            boxShadow: '0 4px 6px rgba(0,0,0,0.1)',
+            letterSpacing: '0.1px',
+            boxShadow: '0 8px 24px rgba(0,0,0,0.18)',
+            border: '1px solid rgba(255,255,255,0.06)',
+            transition: 'all 180ms ease',
           }}
         >
           {response}
