@@ -80,7 +80,7 @@ class ChatStream extends EventEmitter {
  */
 app.post('/api/stream', (req, res) => {
   const { prompt } = req.body;
-
+  console.log(`[new_solution] Received prompt: "${prompt}"`);
   if (!prompt || !prompt.trim()) {
     return res.status(400).json({ error: 'Prompt is required' });
   }
@@ -99,6 +99,7 @@ app.post('/api/stream', (req, res) => {
   const chatStream = new ChatStream(anthropic, prompt);
 
   chatStream.on('chunk', (text) => {
+    console.log(`[new_solution] Emitting chunk: "${text}"`);
     // Each SSE event: "data: <json>\n\n"
     // The double newline is the event delimiter that the client parser looks for.
     res.write(`data: ${JSON.stringify({ text })}\n\n`);
@@ -110,7 +111,7 @@ app.post('/api/stream', (req, res) => {
   });
 
   chatStream.on('error', (err) => {
-    console.error('ChatStream error:', err);
+    console.error(`[new_solution] ChatStream error:`, err);
     if (!res.headersSent) {
       res.status(500).json({ error: 'Stream failed' });
     } else {
@@ -118,10 +119,11 @@ app.post('/api/stream', (req, res) => {
     }
   });
 
-  // If the client disconnects (closes tab, aborts fetch), clean up.
-  req.on('close', () => {
-    chatStream.abort();
-  });
+  // // If the client disconnects (closes tab, aborts fetch), clean up.
+  // req.writableFinished('close', () => {
+  //   console.log('[new_solution] Client disconnected, aborting ChatStream');
+  //   chatStream.abort();
+  // });
 });
 
 app.listen(port, () => {

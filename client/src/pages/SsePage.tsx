@@ -1,13 +1,12 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { useSseStream } from '../hooks/useSseStream';
 
 function SsePage() {
   const [prompt, setPrompt] = useState('');
-  const [response, setResponse] = useState('');
+  const { response, startStream, stopStream, appendResponse } = useSseStream();
   const [isLoading, setIsLoading] = useState(false);
   const [ttft, setTtft] = useState<number | null>(null);
   const [totalTime, setTotalTime] = useState<number | null>(null);
-
-  const eventSourceRef = useRef<EventSource | null>(null);
   const responseEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -15,10 +14,9 @@ function SsePage() {
   }, [response]);
 
   const handleAbort = () => {
-    eventSourceRef.current?.close();
-    eventSourceRef.current = null;
+    stopStream();
     setIsLoading(false);
-    setResponse((prev) => prev + '\n\n[Generation stopped by user]');
+    appendResponse('\n\n[Generation stopped by user]');
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -26,51 +24,24 @@ function SsePage() {
     if (!prompt.trim()) return;
 
     setIsLoading(true);
-    setResponse('');
     setTtft(null);
     setTotalTime(null);
 
     const startTime = Date.now();
-    let isFirstToken = true;
 
-    if (eventSourceRef.current) {
-      eventSourceRef.current.close();
-    }
-
-    const url = `/api/events?prompt=${encodeURIComponent(prompt)}`;
-    const source = new EventSource(url);
-    eventSourceRef.current = source;
-
-    source.onmessage = (event) => {
-      const dataStr = event.data;
-      if (dataStr === '[DONE]') {
+    startStream(prompt, {
+      onFirstToken: () => {
+        setTtft(Date.now() - startTime);
+      },
+      onDone: () => {
         setTotalTime(Date.now() - startTime);
         setIsLoading(false);
-        source.close();
-        eventSourceRef.current = null;
-        return;
-      }
-
-      try {
-        const { text } = JSON.parse(dataStr) as { text: string };
-        if (text) {
-          if (isFirstToken) {
-            setTtft(Date.now() - startTime);
-            isFirstToken = false;
-          }
-          setResponse((prev) => prev + text);
-        }
-      } catch {
-        // Ignore malformed JSON chunk
-      }
-    };
-
-    source.onerror = () => {
-      source.close();
-      eventSourceRef.current = null;
-      setIsLoading(false);
-      setResponse((prev) => prev + '\n\n[Error: Connection interrupted]');
-    };
+      },
+      onError: () => {
+        setIsLoading(false);
+        appendResponse('\n\n[Error: Connection interrupted]');
+      },
+    });
   };
 
   return (

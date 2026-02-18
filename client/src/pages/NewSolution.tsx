@@ -122,8 +122,8 @@ function NewSolution() {
           }
         }
       }
-    } catch (err: any) {
-      if (err.name !== 'AbortError') {
+    } catch (err: unknown) {
+      if ((err as { name?: string }).name !== 'AbortError') {
         setResponse((prev) => prev + '\n\n[Error: Connection failed]');
       }
     } finally {
